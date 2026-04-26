@@ -1,18 +1,30 @@
 """
-Models: StockLSTM and StockTransformer for return prediction.
+Models: StockLSTM (with optional Attention) and StockTransformer
+Supports both regression and classification.
 """
 
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+class TemporalAttention(nn.Module):
+    """Self-attention over LSTM outputs to aggregate sequence info."""
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.attn = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, hidden_dim)
+        scores = self.attn(x).squeeze(-1)          # (batch, seq_len)
+        weights = F.softmax(scores, dim=1)         # (batch, seq_len)
+        context = torch.bmm(weights.unsqueeze(1), x).squeeze(1)  # (batch, hidden_dim)
+        return context, weights
 
 
 class StockLSTM(nn.Module):
-    """
-    Multi-layer LSTM for time-series regression.
-    Output: predicted future return (scalar).
-    """
-
     def __init__(
         self,
         input_dim: int,
@@ -20,12 +32,16 @@ class StockLSTM(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.2,
         bidirectional: bool = False,
+        use_attention: bool = False,
+        task: str = "regression",
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.num_directions = 2 if bidirectional else 1
+        self.use_attention = use_attention
+        self.task = task
 
         self.lstm = nn.LSTM(
             input_size=input_dim,
@@ -36,19 +52,32 @@ class StockLSTM(nn.Module):
             bidirectional=bidirectional,
         )
 
-        self.norm = nn.LayerNorm(hidden_dim * self.num_directions)
+        feat_dim = hidden_dim * self.num_directions
+
+        if use_attention:
+            self.attention = TemporalAttention(feat_dim)
+            self.norm = nn.LayerNorm(feat_dim)
+        else:
+            self.norm = nn.LayerNorm(feat_dim)
+
         self.dropout = nn.Dropout(dropout)
+
+        out_dim = 1 if task == "regression" else 1  # classification uses 1 logit
         self.fc = nn.Sequential(
-            nn.Linear(hidden_dim * self.num_directions, hidden_dim // 2),
+            nn.Linear(feat_dim, hidden_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim // 2, out_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq_len, input_dim)
-        lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden*directions)
-        last = lstm_out[:, -1, :]   # 取最后时刻
+        lstm_out, _ = self.lstm(x)  # (batch, seq_len, feat_dim)
+
+        if self.use_attention:
+            last, _ = self.attention(lstm_out)
+        else:
+            last = lstm_out[:, -1, :]
+
         last = self.norm(last)
         last = self.dropout(last)
         out = self.fc(last)         # (batch, 1)
@@ -56,8 +85,6 @@ class StockLSTM(nn.Module):
 
 
 class SinusoidalPositionalEncoding(nn.Module):
-    """经典正弦位置编码。"""
-
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
@@ -68,19 +95,13 @@ class SinusoidalPositionalEncoding(nn.Module):
         )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0))  # (1, max_len, d_model)
+        self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq_len, d_model)
         return x + self.pe[:, : x.size(1), :]
 
 
 class StockTransformer(nn.Module):
-    """
-    Transformer Encoder for time-series regression.
-    Uses mean pooling over the sequence and an MLP head.
-    """
-
     def __init__(
         self,
         input_dim: int,
@@ -90,8 +111,10 @@ class StockTransformer(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.2,
         max_len: int = 5000,
+        task: str = "regression",
     ):
         super().__init__()
+        self.task = task
         self.input_proj = nn.Linear(input_dim, d_model)
         self.pos_encoder = SinusoidalPositionalEncoding(d_model, max_len)
 
@@ -109,34 +132,37 @@ class StockTransformer(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+
+        out_dim = 1 if task == "regression" else 1
         self.fc = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1),
+            nn.Linear(d_model // 2, out_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch, seq_len, input_dim)
-        x = self.input_proj(x)          # (batch, seq_len, d_model)
+        x = self.input_proj(x)
         x = self.pos_encoder(x)
-        x = self.transformer_encoder(x) # (batch, seq_len, d_model)
-        # mean pooling
-        x = x.mean(dim=1)               # (batch, d_model)
+        x = self.transformer_encoder(x)
+        x = x.mean(dim=1)
         x = self.norm(x)
         x = self.dropout(x)
-        out = self.fc(x)                # (batch, 1)
+        out = self.fc(x)
         return out
 
 
 def build_model(model_type: str, input_dim: int, **kwargs) -> nn.Module:
     model_type = model_type.lower()
+    task = kwargs.get("task", "regression")
     if model_type == "lstm":
         return StockLSTM(
             input_dim=input_dim,
             hidden_dim=kwargs.get("hidden_dim", 128),
             num_layers=kwargs.get("num_layers", 2),
             dropout=kwargs.get("dropout", 0.2),
+            use_attention=kwargs.get("use_attention", False),
+            task=task,
         )
     elif model_type == "transformer":
         return StockTransformer(
@@ -146,6 +172,7 @@ def build_model(model_type: str, input_dim: int, **kwargs) -> nn.Module:
             num_layers=kwargs.get("num_layers", 2),
             dim_feedforward=kwargs.get("dim_feedforward", 256),
             dropout=kwargs.get("dropout", 0.2),
+            task=task,
         )
     else:
         raise ValueError(f"Unknown model_type: {model_type}")

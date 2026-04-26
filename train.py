@@ -1,5 +1,6 @@
 """
 Training script with early stopping, LR scheduling, and metric tracking.
+Supports both regression and classification.
 """
 
 import os
@@ -8,25 +9,56 @@ from typing import Dict, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from models import build_model
 from utils import (
     setup_logger,
     set_seed,
     directional_accuracy,
     ic_metric,
     rank_ic_metric,
+    auc_metric,
+    f1_metric,
+    precision_metric,
+    recall_metric,
     plot_training_history,
 )
 
 logger = setup_logger("train")
 
 
-class EarlyStopping:
-    """早停：当验证指标不再提升时停止训练。"""
+class FocalLoss(nn.Module):
+    """Focal Loss for handling hard-to-classify samples."""
 
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, pos_weight: Optional[float] = None):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.pos_weight = pos_weight
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            logits: (batch, 1) raw logits
+            targets: (batch, 1) binary targets {0, 1}
+        """
+        targets = targets.float()
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, targets,
+            pos_weight=self.pos_weight if self.pos_weight is not None else None,
+            reduction='none'
+        )
+        probs = torch.sigmoid(logits)
+        pt = targets * probs + (1 - targets) * (1 - probs)
+        focal_weight = (1 - pt) ** self.gamma
+        alpha_weight = targets * self.alpha + (1 - targets) * (1 - self.alpha)
+        loss = alpha_weight * focal_weight * bce_loss
+        return loss.mean()
+
+
+class EarlyStopping:
     def __init__(
         self,
         patience: int = 10,
@@ -53,7 +85,6 @@ class EarlyStopping:
         if self.best_value is None:
             self.best_value = val_metric
             return False
-
         if self.is_better(val_metric, self.best_value):
             self.best_value = val_metric
             self.counter = 0
@@ -61,51 +92,88 @@ class EarlyStopping:
         else:
             self.counter += 1
             if self.verbose:
-                logger.info(
-                    f"EarlyStopping counter: {self.counter}/{self.patience}"
-                )
+                logger.info(f"EarlyStopping counter: {self.counter}/{self.patience}")
             if self.counter >= self.patience:
                 self.early_stop = True
             return self.early_stop
 
 
 def evaluate_model(
-    model: nn.Module, dataloader: torch.utils.data.DataLoader, device: torch.device
+    model: nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    device: torch.device,
+    task: str = "regression",
 ) -> Dict[str, float]:
-    """在验证/测试集上评估，返回 loss, IC, RankIC, Directional Accuracy。"""
     model.eval()
-    all_preds, all_targets = [], []
+    all_logits, all_targets = [], []
     total_loss = 0.0
-    criterion = nn.MSELoss()
+
+    if task == "classification":
+        criterion = nn.BCEWithLogitsLoss()
+    else:
+        criterion = nn.MSELoss()
 
     with torch.no_grad():
         for X_batch, y_batch in dataloader:
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
 
-            preds = model(X_batch)
-            loss = criterion(preds, y_batch)
+            logits = model(X_batch)
+            loss = criterion(logits, y_batch)
             total_loss += loss.item() * X_batch.size(0)
 
-            all_preds.append(preds.cpu().numpy())
+            all_logits.append(logits.cpu().numpy())
             all_targets.append(y_batch.cpu().numpy())
 
-    preds = np.concatenate(all_preds).flatten()
+    logits = np.concatenate(all_logits).flatten()
     targets = np.concatenate(all_targets).flatten()
 
     avg_loss = total_loss / len(targets)
-    ic = ic_metric(targets, preds)
-    rank_ic = rank_ic_metric(targets, preds)
-    dir_acc = directional_accuracy(targets, preds)
 
-    return {
-        "loss": avg_loss,
-        "ic": ic,
-        "rank_ic": rank_ic,
-        "dir_acc": dir_acc,
-        "preds": preds,
-        "targets": targets,
-    }
+    if task == "classification":
+        probs = torch.sigmoid(torch.from_numpy(logits)).numpy()
+        labels = targets.astype(int)
+
+        # 使用最优阈值而非固定 0.5
+        from sklearn.metrics import roc_curve
+        if len(np.unique(labels)) >= 2:
+            fpr, tpr, thresholds = roc_curve(labels, probs)
+            # 找到使 F1 最大的阈值
+            best_threshold = 0.5
+            best_f1 = 0.0
+            for th in thresholds:
+                preds_th = (probs > th).astype(int)
+                f1_th = f1_metric(labels, preds_th)
+                if f1_th > best_f1:
+                    best_f1 = f1_th
+                    best_threshold = th
+            preds = (probs > best_threshold).astype(int)
+        else:
+            best_threshold = 0.5
+            preds = (probs > 0.5).astype(int)
+
+        return {
+            "loss": avg_loss,
+            "auc": auc_metric(labels, probs),
+            "acc": np.mean(preds == labels),
+            "f1": f1_metric(labels, preds),
+            "precision": precision_metric(labels, preds),
+            "recall": recall_metric(labels, preds),
+            "probs": probs,
+            "preds": preds,
+            "targets": labels,
+            "threshold": best_threshold,
+        }
+    else:
+        preds = logits
+        return {
+            "loss": avg_loss,
+            "ic": ic_metric(targets, preds),
+            "rank_ic": rank_ic_metric(targets, preds),
+            "dir_acc": directional_accuracy(targets, preds),
+            "preds": preds,
+            "targets": targets,
+        }
 
 
 def train_model(
@@ -120,34 +188,63 @@ def train_model(
     checkpoint_dir: str = "./checkpoints",
     log_dir: str = "./logs",
     seed: int = 42,
+    task: str = "regression",
+    use_focal_loss: bool = False,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0,
 ):
     set_seed(seed)
-
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
     model = model.to(device)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=weight_decay
-    )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=patience // 2, verbose=True
-    )
-    early_stopper = EarlyStopping(patience=patience, mode="min")
+
+    if task == "classification":
+        # 统计训练集正负样本比例
+        all_labels = []
+        for _, y in train_loader:
+            all_labels.extend(y.flatten().tolist())
+        all_labels = np.array(all_labels)
+        pos_ratio = all_labels.mean()
+        pos_weight = torch.tensor((1 - pos_ratio) / (pos_ratio + 1e-6), dtype=torch.float32).to(device)
+
+        if use_focal_loss:
+            criterion = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, pos_weight=pos_weight)
+            logger.info(f"Using Focal Loss: alpha={focal_alpha}, gamma={focal_gamma}, pos_weight={pos_weight.item():.4f}")
+        else:
+            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            logger.info(f"Classification pos_weight={pos_weight.item():.4f}")
+    else:
+        criterion = nn.MSELoss()
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    if task == "classification":
+        # 分类按 AUC 早停
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.5, patience=patience // 2, verbose=True
+        )
+        early_stopper = EarlyStopping(patience=patience, mode="max")
+    else:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=patience // 2, verbose=True
+        )
+        early_stopper = EarlyStopping(patience=patience, mode="min")
+
     writer = SummaryWriter(log_dir)
 
-    history = {
-        "train_loss": [],
-        "val_loss": [],
-        "val_ic": [],
-        "val_dir_acc": [],
-    }
-    best_val_loss = float("inf")
+    history = {"train_loss": [], "val_loss": []}
+    if task == "classification":
+        history.update({"val_auc": [], "val_acc": [], "val_f1": []})
+        best_metric_name = "auc"
+    else:
+        history.update({"val_ic": [], "val_dir_acc": []})
+        best_metric_name = "loss"
+
+    best_val_metric = float("-inf") if task == "classification" else float("inf")
 
     logger.info("Starting training ...")
     for epoch in range(1, epochs + 1):
-        # ---------- Train ----------
         model.train()
         train_losses = []
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}")
@@ -156,74 +253,106 @@ def train_model(
             y_batch = y_batch.to(device)
 
             optimizer.zero_grad()
-            outputs = model(X_batch)
-            loss = criterion(outputs, y_batch)
+            logits = model(X_batch)
+            loss = criterion(logits, y_batch)
             loss.backward()
-
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
             optimizer.step()
+
             train_losses.append(loss.item())
             pbar.set_postfix({"train_loss": f"{loss.item():.6f}"})
 
         avg_train_loss = np.mean(train_losses)
-
-        # ---------- Validation ----------
-        val_metrics = evaluate_model(model, val_loader, device)
+        val_metrics = evaluate_model(model, val_loader, device, task=task)
         avg_val_loss = val_metrics["loss"]
-        val_ic = val_metrics["ic"]
-        val_dir_acc = val_metrics["dir_acc"]
 
-        # ---------- Logging ----------
         history["train_loss"].append(avg_train_loss)
         history["val_loss"].append(avg_val_loss)
-        history["val_ic"].append(val_ic)
-        history["val_dir_acc"].append(val_dir_acc)
 
-        writer.add_scalar("Loss/train", avg_train_loss, epoch)
-        writer.add_scalar("Loss/val", avg_val_loss, epoch)
-        writer.add_scalar("Metrics/val_ic", val_ic, epoch)
-        writer.add_scalar("Metrics/val_rank_ic", val_metrics["rank_ic"], epoch)
-        writer.add_scalar("Metrics/val_dir_acc", val_dir_acc, epoch)
-        writer.add_scalar("LR", optimizer.param_groups[0]["lr"], epoch)
+        if task == "classification":
+            val_auc = val_metrics["auc"]
+            val_acc = val_metrics["acc"]
+            val_f1 = val_metrics["f1"]
+            val_threshold = val_metrics.get("threshold", 0.5)
+            history["val_auc"].append(val_auc)
+            history["val_acc"].append(val_acc)
+            history["val_f1"].append(val_f1)
 
-        logger.info(
-            f"Epoch {epoch:03d} | "
-            f"Train Loss: {avg_train_loss:.6f} | "
-            f"Val Loss: {avg_val_loss:.6f} | "
-            f"Val IC: {val_ic:.4f} | "
-            f"Val RankIC: {val_metrics['rank_ic']:.4f} | "
-            f"Val DirAcc: {val_dir_acc:.4f}"
-        )
+            writer.add_scalar("Loss/train", avg_train_loss, epoch)
+            writer.add_scalar("Loss/val", avg_val_loss, epoch)
+            writer.add_scalar("Metrics/val_auc", val_auc, epoch)
+            writer.add_scalar("Metrics/val_acc", val_acc, epoch)
+            writer.add_scalar("Metrics/val_f1", val_f1, epoch)
+            writer.add_scalar("Metrics/val_threshold", val_threshold, epoch)
+            writer.add_scalar("LR", optimizer.param_groups[0]["lr"], epoch)
 
-        # ---------- Scheduler & Checkpoint ----------
-        scheduler.step(avg_val_loss)
-
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            ckpt_path = os.path.join(checkpoint_dir, "best_model.pt")
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": avg_val_loss,
-                    "val_ic": val_ic,
-                },
-                ckpt_path,
+            logger.info(
+                f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.6f} | "
+                f"Val Loss: {avg_val_loss:.6f} | Val AUC: {val_auc:.4f} | "
+                f"Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Threshold: {val_threshold:.4f}"
             )
-            logger.info(f"Saved best model to {ckpt_path}")
 
-        if early_stopper(avg_val_loss):
-            logger.info("Early stopping triggered.")
-            break
+            scheduler.step(val_auc)
+            if val_auc > best_val_metric:
+                best_val_metric = val_auc
+                ckpt_path = os.path.join(checkpoint_dir, "best_model.pt")
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "val_loss": avg_val_loss,
+                        "val_auc": val_auc,
+                    },
+                    ckpt_path,
+                )
+                logger.info(f"Saved best model to {ckpt_path}")
+
+            if early_stopper(val_auc):
+                logger.info("Early stopping triggered.")
+                break
+        else:
+            val_ic = val_metrics["ic"]
+            val_dir_acc = val_metrics["dir_acc"]
+            history["val_ic"].append(val_ic)
+            history["val_dir_acc"].append(val_dir_acc)
+
+            writer.add_scalar("Loss/train", avg_train_loss, epoch)
+            writer.add_scalar("Loss/val", avg_val_loss, epoch)
+            writer.add_scalar("Metrics/val_ic", val_ic, epoch)
+            writer.add_scalar("Metrics/val_rank_ic", val_metrics["rank_ic"], epoch)
+            writer.add_scalar("Metrics/val_dir_acc", val_dir_acc, epoch)
+            writer.add_scalar("LR", optimizer.param_groups[0]["lr"], epoch)
+
+            logger.info(
+                f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.6f} | "
+                f"Val Loss: {avg_val_loss:.6f} | Val IC: {val_ic:.4f} | "
+                f"Val RankIC: {val_metrics['rank_ic']:.4f} | Val DirAcc: {val_dir_acc:.4f}"
+            )
+
+            scheduler.step(avg_val_loss)
+            if avg_val_loss < best_val_metric:
+                best_val_metric = avg_val_loss
+                ckpt_path = os.path.join(checkpoint_dir, "best_model.pt")
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "val_loss": avg_val_loss,
+                        "val_ic": val_ic,
+                    },
+                    ckpt_path,
+                )
+                logger.info(f"Saved best model to {ckpt_path}")
+
+            if early_stopper(avg_val_loss):
+                logger.info("Early stopping triggered.")
+                break
 
     writer.close()
-
-    # 保存训练历史图
     plot_training_history(
-        history, save_path=os.path.join(log_dir, "training_history.png")
+        history, save_path=os.path.join(log_dir, "training_history.png"), task=task
     )
     logger.info("Training completed.")
     return history

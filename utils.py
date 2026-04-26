@@ -118,23 +118,119 @@ def plot_training_history(history, save_path=None):
     plt.close()
 
 
-def plot_backtest(df_backtest, save_path=None):
-    """df_backtest 需要包含 'date', 'true_return', 'pred_return', 'strategy_cum' 列"""
+def auc_metric(y_true, y_score):
+    """计算 AUC，y_score 为概率或 logit"""
+    from sklearn.metrics import roc_auc_score
+    y_true = np.asarray(y_true).flatten()
+    y_score = np.asarray(y_score).flatten()
+    if len(np.unique(y_true)) < 2:
+        return 0.0
+    return roc_auc_score(y_true, y_score)
+
+
+def f1_metric(y_true, y_pred):
+    """计算 F1"""
+    from sklearn.metrics import f1_score
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    return f1_score(y_true, y_pred, zero_division=0)
+
+
+def precision_metric(y_true, y_pred):
+    from sklearn.metrics import precision_score
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    return precision_score(y_true, y_pred, zero_division=0)
+
+
+def recall_metric(y_true, y_pred):
+    from sklearn.metrics import recall_score
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    return recall_score(y_true, y_pred, zero_division=0)
+
+
+def plot_training_history(history, save_path=None, task="regression"):
+    """history: dict with keys 'train_loss','val_loss', plus task-specific metrics"""
+    n_plots = 3 if task == "regression" else 4
+    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 4))
+    if n_plots == 1:
+        axes = [axes]
+    epochs = range(1, len(history["train_loss"]) + 1)
+
+    ax = axes[0]
+    ax.plot(epochs, history["train_loss"], label="Train Loss")
+    ax.plot(epochs, history["val_loss"], label="Val Loss")
+    ax.set_title("Loss")
+    ax.set_xlabel("Epoch")
+    ax.legend()
+
+    if task == "regression":
+        ax = axes[1]
+        ax.plot(epochs, history["val_ic"], label="Val IC")
+        ax.axhline(0, color="gray", linestyle="--")
+        ax.set_title("Validation IC")
+        ax.set_xlabel("Epoch")
+        ax.legend()
+
+        ax = axes[2]
+        ax.plot(epochs, history["val_dir_acc"], label="Val Dir Acc")
+        ax.axhline(0.5, color="gray", linestyle="--")
+        ax.set_title("Validation Directional Accuracy")
+        ax.set_xlabel("Epoch")
+        ax.legend()
+    else:
+        ax = axes[1]
+        ax.plot(epochs, history["val_auc"], label="Val AUC")
+        ax.axhline(0.5, color="gray", linestyle="--")
+        ax.set_title("Validation AUC")
+        ax.set_xlabel("Epoch")
+        ax.legend()
+
+        ax = axes[2]
+        ax.plot(epochs, history["val_acc"], label="Val Acc")
+        ax.axhline(0.5, color="gray", linestyle="--")
+        ax.set_title("Validation Accuracy")
+        ax.set_xlabel("Epoch")
+        ax.legend()
+
+        ax = axes[3]
+        ax.plot(epochs, history["val_f1"], label="Val F1")
+        ax.set_title("Validation F1")
+        ax.set_xlabel("Epoch")
+        ax.legend()
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150)
+    plt.close()
+
+
+def plot_backtest(df_backtest, save_path=None, task="regression"):
+    """df_backtest 需要包含 'date', 'strategy_cum', 'buyhold_cum' 列"""
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
 
     ax = axes[0]
-    ax.plot(df_backtest["date"], df_backtest["true_return"].cumsum(), label="Buy & Hold")
+    ax.plot(df_backtest["date"], df_backtest["buyhold_cum"], label="Buy & Hold")
     ax.plot(df_backtest["date"], df_backtest["strategy_cum"], label="Strategy")
     ax.set_title("Cumulative Return")
     ax.legend()
     ax.set_ylabel("Cumulative Return")
 
     ax = axes[1]
-    colors = ["green" if p > 0 else "red" for p in df_backtest["pred_return"]]
-    ax.bar(df_backtest["date"], df_backtest["pred_return"], color=colors, alpha=0.6, width=1.0)
-    ax.axhline(0, color="black", linewidth=0.5)
-    ax.set_title("Predicted Return")
-    ax.set_ylabel("Predicted Return")
+    if task == "regression":
+        colors = ["green" if p > 0 else "red" for p in df_backtest["pred_return"]]
+        ax.bar(df_backtest["date"], df_backtest["pred_return"], color=colors, alpha=0.6, width=1.0)
+        ax.axhline(0, color="black", linewidth=0.5)
+        ax.set_title("Predicted Return")
+        ax.set_ylabel("Predicted Return")
+    else:
+        colors = ["green" if p > 0.5 else "red" for p in df_backtest["pred_prob"]]
+        ax.bar(df_backtest["date"], df_backtest["pred_prob"], color=colors, alpha=0.6, width=1.0)
+        ax.axhline(0.5, color="black", linewidth=0.5)
+        ax.set_title("Predicted Probability (Up)")
+        ax.set_ylabel("Probability")
 
     plt.tight_layout()
     if save_path:

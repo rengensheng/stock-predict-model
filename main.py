@@ -1,6 +1,6 @@
 """
 Main entry: full pipeline from data fetch → train → infer/backtest.
-Run: python main.py [--model_type lstm|transformer]
+Run: python main.py [--model_type lstm|transformer] [--task classification|regression]
 """
 
 import argparse
@@ -23,12 +23,22 @@ def parse_args():
     parser.add_argument(
         "--model_type",
         type=str,
-        default="lstm",
+        default=cfg.MODEL_TYPE,
         choices=["lstm", "transformer"],
         help="Model architecture",
     )
     parser.add_argument(
-        "--symbol", type=str, default=cfg.SYMBOL, help="Stock symbol, e.g. sz000001"
+        "--symbols",
+        nargs="+",
+        default=cfg.SYMBOLS,
+        help="List of stock symbols, e.g. sz000001 sh600519",
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default=cfg.TASK,
+        choices=["classification", "regression"],
+        help="Task type",
     )
     parser.add_argument(
         "--epochs", type=int, default=cfg.EPOCHS, help="Max training epochs"
@@ -41,10 +51,10 @@ def parse_args():
         "--seq_len", type=int, default=cfg.SEQ_LEN, help="Sequence length"
     )
     parser.add_argument(
-        "--horizon", type=int, default=cfg.HORIZON, help="Prediction horizon"
+        "--step", type=int, default=cfg.STEP, help="Sliding window step"
     )
     parser.add_argument(
-        "--step", type=int, default=cfg.STEP, help="Sliding window step (1 or 2 to increase samples)"
+        "--horizon", type=int, default=cfg.HORIZON, help="Prediction horizon"
     )
     parser.add_argument(
         "--hidden_dim", type=int, default=cfg.HIDDEN_DIM, help="Hidden dimension"
@@ -55,6 +65,12 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=cfg.DROPOUT, help="Dropout")
     parser.add_argument(
         "--patience", type=int, default=cfg.PATIENCE, help="Early stopping patience"
+    )
+    parser.add_argument(
+        "--use_attention",
+        action="store_true",
+        default=cfg.USE_ATTENTION,
+        help="Use temporal attention in LSTM",
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed"
@@ -76,7 +92,7 @@ def main():
     logger.info("BUILDING DATA PIPELINE")
     logger.info("=" * 50)
     pipeline = StockDataPipeline(
-        symbol=args.symbol,
+        symbols=args.symbols,
         start_date=cfg.START_DATE,
         end_date=cfg.END_DATE,
         horizon=args.horizon,
@@ -85,6 +101,7 @@ def main():
         batch_size=args.batch_size,
         train_ratio=cfg.TRAIN_RATIO,
         val_ratio=cfg.VAL_RATIO,
+        task=args.task,
     )
     pipeline.prepare()
 
@@ -97,8 +114,11 @@ def main():
         "hidden_dim": args.hidden_dim,
         "num_layers": args.num_layers,
         "dropout": args.dropout,
+        "task": args.task,
     }
-    if args.model_type == "transformer":
+    if args.model_type == "lstm":
+        model_kwargs["use_attention"] = args.use_attention
+    elif args.model_type == "transformer":
         model_kwargs["nhead"] = cfg.NHEAD
         model_kwargs["dim_feedforward"] = cfg.DIM_FEEDFORWARD
 
@@ -126,6 +146,10 @@ def main():
             checkpoint_dir=cfg.CHECKPOINT_DIR,
             log_dir=cfg.LOG_DIR,
             seed=args.seed,
+            task=args.task,
+            use_focal_loss=cfg.USE_FOCAL_LOSS,
+            focal_alpha=cfg.FOCAL_ALPHA,
+            focal_gamma=cfg.FOCAL_GAMMA,
         )
     else:
         logger.info("--skip_train is set, loading existing checkpoint ...")
@@ -145,14 +169,13 @@ def main():
         **model_kwargs,
     )
 
-    # Validation set
     evaluate_and_backtest(
-        model, pipeline, split="val", device=device, result_dir=cfg.RESULT_DIR
+        model, pipeline, split="val", device=device,
+        result_dir=cfg.RESULT_DIR, task=args.task, threshold=cfg.CLASS_THRESHOLD,
     )
-
-    # Test set
     evaluate_and_backtest(
-        model, pipeline, split="test", device=device, result_dir=cfg.RESULT_DIR
+        model, pipeline, split="test", device=device,
+        result_dir=cfg.RESULT_DIR, task=args.task, threshold=cfg.CLASS_THRESHOLD,
     )
 
     logger.info("All done.")
