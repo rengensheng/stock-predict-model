@@ -1,0 +1,7 @@
+checkpoints/
+data_cache/
+logs/
+results/
+.vscode/
+.claude/
+.qwen/
