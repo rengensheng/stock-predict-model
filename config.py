@@ -5,13 +5,13 @@ Stock Prediction Model Configuration
 import torch
 
 # ---------------- Data ----------------
-SYMBOLS = ["sz000001", "sh600519", "sz000858", "sh600036", "sz002415"]
+SYMBOLS = ["sh600552"]
 START_DATE = "20150101"
 END_DATE = "20260426"
-HORIZON = 5                  # 预测未来 N 日涨跌
-SEQ_LEN = 60                 # 序列长度
-STEP = 1                     # 滑动窗口步长
-BATCH_SIZE = 64              # 减小 batch size 增加梯度更新频率
+HORIZON = 5                  # 预测未来 5 日涨跌（增加预测周期以过滤噪声）
+SEQ_LEN = 60                 # 序列长度（增加到 60 天以捕捉更长期的模式）
+STEP = 5                     # 滑动窗口步长（增加步长以减少样本间的相关性）
+BATCH_SIZE = 128             # 增大 batch size 以稳定训练
 NUM_WORKERS = 0
 
 TRAIN_RATIO = 0.70
@@ -21,7 +21,7 @@ TEST_RATIO = 0.15
 # ---------------- Task ----------------
 TASK = "classification"      # "classification" (up/down) or "regression" (return)
 CLASS_THRESHOLD = 0.5        # 分类概率阈值
-LABEL_THRESHOLD = 0.01       # 分类任务中，|future_return| < threshold 的样本标记为 ignore
+LABEL_THRESHOLD = 0.02       # 分类任务中，|future_return| < threshold 的样本标记为 ignore（提高阈值以过滤噪声）
 USE_FOCAL_LOSS = True        # 使用 Focal Loss 处理难分类样本
 FOCAL_ALPHA = None           # Focal Loss alpha: None=auto from class ratio, or set e.g. 0.25
 FOCAL_GAMMA = 2.0            # Focal Loss gamma 基础参数
@@ -32,20 +32,21 @@ LABEL_SMOOTHING = 0.1        # BCEWithLogitsLoss 的标签平滑参数
 # ---------------- Model ----------------
 MODEL_TYPE = "lstm"          # "lstm" or "transformer"
 INPUT_DIM = None
-HIDDEN_DIM = 128             # 隐藏层维度
-NUM_LAYERS = 2               # 层数
-DROPOUT = 0.5                # dropout (提高以对抗过拟合)
+HIDDEN_DIM = 256             # 增加隐藏层维度以增强模型表达能力
+NUM_LAYERS = 3               # 增加层数
+DROPOUT = 0.3                # 适当降低 dropout 以允许模型学习更多模式
 USE_ATTENTION = True         # LSTM 是否加 Attention
+USE_FEATURE_GROUPING = True  # 是否使用特征分组编码
 
 # Transformer specific
 NHEAD = 8
 DIM_FEEDFORWARD = 512
 
 # ---------------- Training ----------------
-EPOCHS = 100
-LR = 5e-4                    # 降低学习率
-WEIGHT_DECAY = 1e-2          # 增加正则化
-PATIENCE = 15                # 增加早停耐心
+EPOCHS = 150                 # 增加训练轮数
+LR = 1e-3                    # 提高学习率
+WEIGHT_DECAY = 5e-3          # 适当降低权重衰减
+PATIENCE = 20                # 增加早停耐心
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ---------------- Paths ----------------

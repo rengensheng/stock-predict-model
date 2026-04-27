@@ -116,6 +116,7 @@ def main():
         "num_layers": args.num_layers,
         "dropout": args.dropout,
         "task": args.task,
+        "use_feature_grouping": cfg.USE_FEATURE_GROUPING,
     }
     if args.model_type == "lstm":
         model_kwargs["use_attention"] = args.use_attention

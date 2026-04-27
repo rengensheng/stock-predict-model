@@ -129,6 +129,7 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["ret_1"] = df["close"].pct_change()
 
+    # ==================== 量价基础特征 ====================
     # 多周期滞后收益
     for lag in [1, 2, 3, 5, 10, 20]:
         df[f"ret_lag_{lag}"] = df["ret_1"].shift(lag)
@@ -137,84 +138,221 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     for window in [3, 5, 10, 20]:
         df[f"ret_cum_{window}"] = df["close"] / df["close"].shift(window) - 1
 
-    # 均线和偏离度
-    for window in [5, 10, 20, 60]:
+    # ==================== 均线系统 ====================
+    # 多周期均线及偏离度
+    for window in [5, 10, 20, 30, 60, 120]:
         ma = df["close"].rolling(window).mean()
         df[f"ma_{window}"] = ma
         df[f"close_div_ma_{window}"] = df["close"] / (ma + 1e-12) - 1
 
-    # 波动率
-    for window in [5, 10, 20]:
-        df[f"volatility_{window}"] = df["ret_1"].rolling(window).std()
+    # 均线多头排列强度：短期均线 > 长期均线的程度
+    df["ma5_gt_ma10"] = (df["ma_5"] - df["ma_10"]) / (df["close"] + 1e-12)
+    df["ma10_gt_ma20"] = (df["ma_10"] - df["ma_20"]) / (df["close"] + 1e-12)
+    df["ma20_gt_ma60"] = (df["ma_20"] - df["ma_60"]) / (df["close"] + 1e-12)
+    # 多头排列综合得分：多条均线依次递增的程度
+    df["ma_bullish_score"] = (
+        (df["ma_5"] > df["ma_10"]).astype(float) +
+        (df["ma_10"] > df["ma_20"]).astype(float) +
+        (df["ma_20"] > df["ma_60"]).astype(float)
+    ) / 3.0
 
-    # 成交量特征
+    # 均线收敛度（短期均线之间的离散程度）
+    df["ma_spread_5_10"] = abs(df["ma_5"] - df["ma_10"]) / (df["close"] + 1e-12)
+    df["ma_spread_10_20"] = abs(df["ma_10"] - df["ma_20"]) / (df["close"] + 1e-12)
+
+    # ==================== 成交量特征 ====================
+    # 基础量比
     df["volume_ma5"] = df["volume"].rolling(5).mean()
-    df["volume_ratio"] = df["volume"] / (df["volume_ma5"] + 1e-12)
+    df["volume_ma10"] = df["volume"].rolling(10).mean()
+    df["volume_ma20"] = df["volume"].rolling(20).mean()
+    df["volume_ratio_5"] = df["volume"] / (df["volume_ma5"] + 1e-12)  # 5日均量比
+    df["volume_ratio_10"] = df["volume"] / (df["volume_ma10"] + 1e-12)  # 10日均量比
+    df["volume_ratio_20"] = df["volume"] / (df["volume_ma20"] + 1e-12)  # 20日均量比（量比）
+
+    # 成交量变化率
     df["volume_change"] = df["volume"].pct_change()
-    if "turnover" not in df.columns:
-        df["turnover"] = 0.0
-    df["turnover_ma5"] = df["turnover"].rolling(5).mean()
-    df["turnover_ratio"] = df["turnover"] / (df["turnover_ma5"] + 1e-12)
+    df["volume_change_5"] = df["volume"] / df["volume"].shift(5) - 1
+    df["volume_change_10"] = df["volume"] / df["volume"].shift(10) - 1
+
+    # 量价关系：成交量与收益率的相关性（多周期）
+    for window in [5, 10, 20]:
+        df[f"vol_price_corr_{window}"] = df["volume"].rolling(window).corr(df["ret_1"])
+
+    # 量减价升信号（潜在看涨）
+    df["vol_down_price_up"] = ((df["volume"] < df["volume"].shift(1)) & (df["close"] > df["close"].shift(1))).astype(float)
+    # 量增价升信号（趋势延续）
+    df["vol_up_price_up"] = ((df["volume"] > df["volume"].shift(1)) & (df["close"] > df["close"].shift(1))).astype(float)
+    # 量增价跌信号（潜在看跌）
+    df["vol_up_price_down"] = ((df["volume"] > df["volume"].shift(1)) & (df["close"] < df["close"].shift(1))).astype(float)
+
+    # 换手率特征
+    if "turnover" in df.columns:
+        df["turnover_ma5"] = df["turnover"].rolling(5).mean()
+        df["turnover_ma10"] = df["turnover"].rolling(10).mean()
+        df["turnover_ratio_5"] = df["turnover"] / (df["turnover_ma5"] + 1e-12)
+        df["turnover_ratio_10"] = df["turnover"] / (df["turnover_ma10"] + 1e-12)
+        df["turnover_change"] = df["turnover"].pct_change()
 
     # OBV 资金流向
     obv = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
     df["obv"] = obv
+    df["obv_ma5"] = obv.rolling(5).mean()
     df["obv_ma10"] = obv.rolling(10).mean()
+    df["obv_ma20"] = obv.rolling(20).mean()
     df["obv_signal"] = obv / (obv.rolling(10).mean() + 1e-12) - 1
+    # OBV 趋势：短期均线上穿长期均线
+    df["obv_golden_cross"] = ((df["obv_ma5"] > df["obv_ma10"]) & (df["obv_ma5"].shift(1) <= df["obv_ma10"].shift(1))).astype(float)
 
+    # ==================== 波动率特征 ====================
+    for window in [5, 10, 20, 60]:
+        df[f"volatility_{window}"] = df["ret_1"].rolling(window).std()
+
+    # 短期波动率与长期波动率的比值
+    df["volatility_ratio_5_20"] = df["volatility_5"] / (df["volatility_20"] + 1e-12)
+    df["volatility_ratio_10_60"] = df["volatility_10"] / (df["volatility_60"] + 1e-12)
+    df["volatility_ratio_20_60"] = df["volatility_20"] / (df["volatility_60"] + 1e-12)
+
+    # 历史波动率与平均波动率的比值
+    df["vol_vs_avg"] = df["volatility_20"] / (df["volatility_60"] + 1e-12)
+
+    # ==================== 动量/震荡指标 ====================
     # RSI 多周期
-    df["rsi_14"] = ta.momentum.RSIIndicator(close=df["close"], window=14).rsi()
-    df["rsi_6"] = ta.momentum.RSIIndicator(close=df["close"], window=6).rsi()
+    for window in [6, 12, 14, 24]:
+        df[f"rsi_{window}"] = ta.momentum.RSIIndicator(close=df["close"], window=window).rsi()
 
-    # MACD
+    # RSI 偏离度
+    df["rsi_14_ma5"] = df["rsi_14"].rolling(5).mean()
+    df["rsi_14_div_ma"] = df["rsi_14"] / (df["rsi_14_ma5"] + 1e-12) - 1
+    # RSI 超买超卖信号
+    df["rsi_overbought"] = (df["rsi_14"] > 70).astype(float)
+    df["rsi_oversold"] = (df["rsi_14"] < 30).astype(float)
+
+    # MACD 多参数
+    for fast, slow, signal in [(12, 26, 9), (6, 13, 9), (8, 21, 5)]:
+        macd_indicator = ta.trend.MACD(close=df["close"], window_slow=slow, window_fast=fast, window_sign=signal)
+        df[f"macd_{fast}_{slow}"] = macd_indicator.macd()
+        df[f"macd_signal_{fast}_{slow}"] = macd_indicator.macd_signal()
+        df[f"macd_diff_{fast}_{slow}"] = macd_indicator.macd_diff()
+
+    # 标准 MACD (12, 26, 9)
     macd = ta.trend.MACD(close=df["close"])
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
     df["macd_diff"] = macd.macd_diff()
 
-    # 布林带
-    bb = ta.volatility.BollingerBands(close=df["close"], window=20, window_dev=2)
-    df["bb_high"] = bb.bollinger_hband()
-    df["bb_low"] = bb.bollinger_lband()
-    df["bb_width"] = (df["bb_high"] - df["bb_low"]) / (df["close"] + 1e-12)
-    df["bb_position"] = (df["close"] - df["bb_low"]) / (df["bb_high"] - df["bb_low"] + 1e-12)
+    # MACD 金叉死叉信号
+    df["macd_golden_cross"] = ((df["macd"] > df["macd_signal"]) & (df["macd"].shift(1) <= df["macd_signal"].shift(1))).astype(float)
+    df["macd_death_cross"] = ((df["macd"] < df["macd_signal"]) & (df["macd"].shift(1) >= df["macd_signal"].shift(1))).astype(float)
+    # MACD 柱状图变化
+    df["macd_hist_change"] = df["macd_diff"] - df["macd_diff"].shift(1)
 
-    # ATR
-    df["atr_14"] = ta.volatility.AverageTrueRange(
-        high=df["high"], low=df["low"], close=df["close"], window=14
-    ).average_true_range()
-    df["atr_ratio"] = df["atr_14"] / df["close"]
+    # Stochastic 随机指标
+    stoch = ta.momentum.StochasticOscillator(high=df["high"], low=df["low"], close=df["close"], window=14)
+    df["stoch_k"] = stoch.stoch()
+    df["stoch_d"] = stoch.stoch_signal()
+    # KDJ 指标
+    df["stoch_j"] = 3 * df["stoch_k"] - 2 * df["stoch_d"]
+    # KDJ 金叉死叉
+    df["kdj_golden_cross"] = ((df["stoch_k"] > df["stoch_d"]) & (df["stoch_k"].shift(1) <= df["stoch_d"].shift(1))).astype(float)
+    df["kdj_death_cross"] = ((df["stoch_k"] < df["stoch_d"]) & (df["stoch_k"].shift(1) >= df["stoch_d"].shift(1))).astype(float)
 
-    # ADX 趋势强度
+    # CCI 商品路径指标
+    for window in [14, 20, 40]:
+        df[f"cci_{window}"] = ta.trend.CCIIndicator(high=df["high"], low=df["low"], close=df["close"], window=window).cci()
+
+    # Williams %R
+    df["williams_r_14"] = ta.momentum.WilliamsRIndicator(high=df["high"], low=df["low"], close=df["close"], lbp=14).williams_r()
+    df["williams_r_7"] = ta.momentum.WilliamsRIndicator(high=df["high"], low=df["low"], close=df["close"], lbp=7).williams_r()
+
+    # ==================== 趋势强度指标 ====================
+    # ADX
     adx = ta.trend.ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
     df["adx"] = adx.adx()
     df["adx_pos"] = adx.adx_pos()
     df["adx_neg"] = adx.adx_neg()
+    df["adx_strong"] = (df["adx"] > 25).astype(float)
 
-    # Stochastic
-    stoch = ta.momentum.StochasticOscillator(high=df["high"], low=df["low"], close=df["close"], window=14)
-    df["stoch_k"] = stoch.stoch()
-    df["stoch_d"] = stoch.stoch_signal()
+    # ==================== 波动率通道指标 ====================
+    # 布林带
+    for window, dev in [(20, 2), (20, 1.5), (26, 2)]:
+        bb = ta.volatility.BollingerBands(close=df["close"], window=window, window_dev=dev)
+        bb_high = bb.bollinger_hband()
+        bb_low = bb.bollinger_lband()
+        df[f"bb_high_{window}_{dev}"] = bb_high
+        df[f"bb_low_{window}_{dev}"] = bb_low
+        df[f"bb_width_{window}_{dev}"] = (bb_high - bb_low) / (df["close"] + 1e-12)
+        df[f"bb_position_{window}_{dev}"] = (df["close"] - bb_low) / (bb_high - bb_low + 1e-12)
 
-    # CCI
-    df["cci_20"] = ta.trend.CCIIndicator(high=df["high"], low=df["low"], close=df["close"], window=20).cci()
+    # ATR 真实波动幅度
+    for window in [7, 14, 21]:
+        df[f"atr_{window}"] = ta.volatility.AverageTrueRange(
+            high=df["high"], low=df["low"], close=df["close"], window=window
+        ).average_true_range()
+        df[f"atr_ratio_{window}"] = df[f"atr_{window}"] / df["close"]
 
-    # Williams %R
-    df["williams_r"] = ta.momentum.WilliamsRIndicator(high=df["high"], low=df["low"], close=df["close"], lbp=14).williams_r()
-
-    # 价格形态特征
-    df["hl_ratio"] = (df["high"] - df["low"]) / (df["close"] + 1e-12)
+    # ==================== 价格形态特征 ====================
+    df["hl_range"] = (df["high"] - df["low"]) / (df["close"] + 1e-12)
     df["close_position"] = (df["close"] - df["low"]) / (df["high"] - df["low"] + 1e-12)
     df["oc_ratio"] = (df["close"] - df["open"]) / (df["high"] - df["low"] + 1e-12)  # 蜡烛图实体比例
     df["gap"] = (df["open"] - df["close"].shift(1)) / df["close"].shift(1)  # 跳空
 
-    # 高低点突破
-    df["high_20"] = df["high"].rolling(20).max()
-    df["low_20"] = df["low"].rolling(20).min()
-    df["break_high"] = (df["close"] - df["high_20"].shift(1)) / (df["high_20"].shift(1) + 1e-12)
-    df["break_low"] = (df["close"] - df["low_20"].shift(1)) / (df["low_20"].shift(1) + 1e-12)
+    # 上下影线
+    df["upper_shadow"] = (df["high"] - df[["close", "open"]].max(axis=1)) / (df["close"] + 1e-12)
+    df["lower_shadow"] = (df[["close", "open"]].min(axis=1) - df["low"]) / (df["close"] + 1e-12)
 
-    df.dropna(inplace=True)
+    # 高低点突破
+    for window in [10, 20, 40]:
+        df[f"high_{window}"] = df["high"].rolling(window).max()
+        df[f"low_{window}"] = df["low"].rolling(window).min()
+        df[f"break_high_{window}"] = (df["close"] - df[f"high_{window}"].shift(1)) / (df[f"high_{window}"].shift(1) + 1e-12)
+        df[f"break_low_{window}"] = (df["close"] - df[f"low_{window}"].shift(1)) / (df[f"low_{window}"].shift(1) + 1e-12)
+
+    # ==================== 资金流向指标 ====================
+    # 典型价格
+    df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
+    
+    # 能量潮（已计算OBV）
+    # 资金流量指标 MFI（手动实现）
+    tp = df["typical_price"]
+    raw_money_flow = tp * df["volume"]
+    
+    # 根据典型价格变化方向区分正负资金流
+    tp_diff = tp.diff()
+    positive_flow = raw_money_flow.where(tp_diff > 0, 0.0)
+    negative_flow = raw_money_flow.where(tp_diff < 0, 0.0)
+    
+    # 计算 N 日资金比率
+    for mfi_window in [7, 14]:
+        pos_sum = positive_flow.rolling(mfi_window).sum()
+        neg_sum = negative_flow.rolling(mfi_window).sum()
+        money_ratio = pos_sum / (neg_sum + 1e-12)
+        df[f"mfi_{mfi_window}"] = 100 - (100 / (1 + money_ratio))
+        df[f"mfi_overbought_{mfi_window}"] = (df[f"mfi_{mfi_window}"] > 80).astype(float)
+        df[f"mfi_oversold_{mfi_window}"] = (df[f"mfi_{mfi_window}"] < 20).astype(float)
+
+    # 换手率与量比结合
+    if "turnover" in df.columns:
+        df["turnover_volume_ratio"] = df["turnover"] / (df["volume_ratio_5"] + 1e-12)
+
+    # ==================== 市场情绪指标 ====================
+    # 涨跌幅度（当日振幅）
+    df["amplitude"] = (df["high"] - df["low"]) / df["close"].shift(1)
+    # 收盘价在当日价格区间的位置
+    df["close_to_high"] = df["close"] / (df["high"] + 1e-12)
+    df["close_to_low"] = df["close"] / (df["low"] + 1e-12)
+
+    # 连续涨跌天数
+    df["up_day"] = (df["close"] > df["close"].shift(1)).astype(int)
+    df["down_day"] = (df["close"] < df["close"].shift(1)).astype(int)
+    # 使用 groupby 计算连续天数
+    df["consecutive_up"] = df["up_day"].groupby(df["up_day"].ne(df["up_day"].shift(1)).cumsum()).cumsum() * df["up_day"]
+    df["consecutive_down"] = df["down_day"].groupby(df["down_day"].ne(df["down_day"].shift(1)).cumsum()).cumsum() * df["down_day"]
+
+    # 替换无穷大值为 NaN
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # 填充剩余的 NaN 为 0（主要是序列开头的指标）
+    df.fillna(0, inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
