@@ -85,39 +85,6 @@ def max_drawdown(cum_returns):
     return drawdown.min()
 
 
-def plot_training_history(history, save_path=None):
-    """history: dict with keys 'train_loss','val_loss','val_ic','val_dir_acc'"""
-    epochs = range(1, len(history["train_loss"]) + 1)
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-
-    ax = axes[0]
-    ax.plot(epochs, history["train_loss"], label="Train Loss")
-    ax.plot(epochs, history["val_loss"], label="Val Loss")
-    ax.set_title("Loss")
-    ax.set_xlabel("Epoch")
-    ax.legend()
-
-    ax = axes[1]
-    ax.plot(epochs, history["val_ic"], label="Val IC")
-    ax.axhline(0, color="gray", linestyle="--")
-    ax.set_title("Validation IC")
-    ax.set_xlabel("Epoch")
-    ax.legend()
-
-    ax = axes[2]
-    ax.plot(epochs, history["val_dir_acc"], label="Val Dir Acc")
-    ax.axhline(0.5, color="gray", linestyle="--")
-    ax.set_title("Validation Directional Accuracy")
-    ax.set_xlabel("Epoch")
-    ax.legend()
-
-    plt.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150)
-    plt.close()
-
-
 def auc_metric(y_true, y_score):
     """计算 AUC，y_score 为概率或 logit"""
     from sklearn.metrics import roc_auc_score

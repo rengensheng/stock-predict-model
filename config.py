@@ -22,15 +22,15 @@ TEST_RATIO = 0.15
 TASK = "classification"      # "classification" (up/down) or "regression" (return)
 CLASS_THRESHOLD = 0.5        # 分类概率阈值
 USE_FOCAL_LOSS = True        # 使用 Focal Loss 处理难分类样本
-FOCAL_ALPHA = 0.25           # Focal Loss alpha 参数
+FOCAL_ALPHA = None            # Focal Loss alpha: None=auto from class ratio, or set e.g. 0.25
 FOCAL_GAMMA = 2.0            # Focal Loss gamma 参数
 
 # ---------------- Model ----------------
 MODEL_TYPE = "lstm"          # "lstm" or "transformer"
 INPUT_DIM = None
-HIDDEN_DIM = 256             # 增加隐藏层维度
-NUM_LAYERS = 3               # 增加层数
-DROPOUT = 0.3                # 增加 dropout
+HIDDEN_DIM = 128             # 隐藏层维度
+NUM_LAYERS = 2               # 层数
+DROPOUT = 0.2                # dropout
 USE_ATTENTION = True         # LSTM 是否加 Attention
 
 # Transformer specific

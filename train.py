@@ -30,13 +30,19 @@ logger = setup_logger("train")
 
 
 class FocalLoss(nn.Module):
-    """Focal Loss for handling hard-to-classify samples."""
+    """Focal Loss for handling hard-to-classify samples.
 
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, pos_weight: Optional[float] = None):
+    alpha: weight for the positive class (0 < alpha < 1).
+           For balanced data, alpha should be close to the negative class ratio
+           (i.e. 1 - positive_ratio), so that the minority class gets higher weight.
+           If alpha is None, it will be set from data (1 - pos_ratio).
+    gamma: focusing parameter. Higher gamma means more focus on hard samples.
+    """
+
+    def __init__(self, alpha: Optional[float] = None, gamma: float = 2.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.pos_weight = pos_weight
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -45,15 +51,16 @@ class FocalLoss(nn.Module):
             targets: (batch, 1) binary targets {0, 1}
         """
         targets = targets.float()
-        bce_loss = F.binary_cross_entropy_with_logits(
-            logits, targets,
-            pos_weight=self.pos_weight if self.pos_weight is not None else None,
-            reduction='none'
-        )
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
         probs = torch.sigmoid(logits)
         pt = targets * probs + (1 - targets) * (1 - probs)
         focal_weight = (1 - pt) ** self.gamma
-        alpha_weight = targets * self.alpha + (1 - targets) * (1 - self.alpha)
+
+        if self.alpha is not None:
+            alpha_weight = targets * self.alpha + (1 - targets) * (1 - self.alpha)
+        else:
+            alpha_weight = 1.0
+
         loss = alpha_weight * focal_weight * bce_loss
         return loss.mean()
 
@@ -190,7 +197,7 @@ def train_model(
     seed: int = 42,
     task: str = "regression",
     use_focal_loss: bool = False,
-    focal_alpha: float = 0.25,
+    focal_alpha: Optional[float] = None,
     focal_gamma: float = 2.0,
 ):
     set_seed(seed)
@@ -206,14 +213,32 @@ def train_model(
             all_labels.extend(y.flatten().tolist())
         all_labels = np.array(all_labels)
         pos_ratio = all_labels.mean()
-        pos_weight = torch.tensor((1 - pos_ratio) / (pos_ratio + 1e-6), dtype=torch.float32).to(device)
+        neg_ratio = 1.0 - pos_ratio
+        logger.info(f"Class balance: pos={pos_ratio:.4f}, neg={neg_ratio:.4f}")
 
         if use_focal_loss:
-            criterion = FocalLoss(alpha=focal_alpha, gamma=focal_gamma, pos_weight=pos_weight)
-            logger.info(f"Using Focal Loss: alpha={focal_alpha}, gamma={focal_gamma}, pos_weight={pos_weight.item():.4f}")
+            # alpha: weight for positive class. Set to neg_ratio so minority gets more weight.
+            # For balanced data (pos≈0.5), alpha≈0.5 — essentially neutral.
+            if focal_alpha is None:
+                computed_alpha = float(neg_ratio)
+            else:
+                computed_alpha = focal_alpha
+            criterion = FocalLoss(alpha=computed_alpha, gamma=focal_gamma)
+            logger.info(f"Using Focal Loss: alpha={computed_alpha:.4f} (pos_weight), gamma={focal_gamma}")
+
+        # Initialize final classification bias to match prior, preventing all-negative logits
+        try:
+            last_linear = model.fc[-1]  # Sequential last layer
+            if isinstance(last_linear, nn.Linear) and last_linear.out_features == 1:
+                init_bias = np.log(pos_ratio / (neg_ratio + 1e-6))
+                torch.nn.init.constant_(last_linear.bias, init_bias)
+                logger.info(f"Initialized output bias to {init_bias:.4f} (log-odds of pos_ratio)")
+        except Exception:
+            pass
         else:
+            pos_weight = torch.tensor(neg_ratio / (pos_ratio + 1e-6), dtype=torch.float32).to(device)
             criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            logger.info(f"Classification pos_weight={pos_weight.item():.4f}")
+            logger.info(f"Using BCEWithLogitsLoss: pos_weight={pos_weight.item():.4f}")
     else:
         criterion = nn.MSELoss()
 
@@ -222,12 +247,12 @@ def train_model(
     if task == "classification":
         # 分类按 AUC 早停
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="max", factor=0.5, patience=patience // 2, verbose=True
+            optimizer, mode="max", factor=0.5, patience=patience // 2
         )
         early_stopper = EarlyStopping(patience=patience, mode="max")
     else:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=patience // 2, verbose=True
+            optimizer, mode="min", factor=0.5, patience=patience // 2
         )
         early_stopper = EarlyStopping(patience=patience, mode="min")
 

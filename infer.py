@@ -128,12 +128,15 @@ def evaluate_and_backtest(
         if "future_return" not in bt_df.columns:
             bt_df["future_return"] = 0.0
 
-        bt_df = backtest_directional(bt_df, threshold=threshold)
+        # Use the optimal threshold found during evaluation
+        optimal_th = metrics.get("threshold", threshold)
+        bt_df_opt = backtest_directional(bt_df.copy(), threshold=optimal_th)
+        bt_df_fixed = backtest_directional(bt_df.copy(), threshold=threshold)
 
-        sr = sharpe_ratio(bt_df["strategy_return"].values)
-        mdd = max_drawdown(bt_df["strategy_cum"].values + 1.0)
-        buyhold_sr = sharpe_ratio(bt_df["future_return"].values) if "future_return" in bt_df.columns else 0.0
-        buyhold_mdd = max_drawdown(bt_df["buyhold_cum"].values + 1.0)
+        sr_opt = sharpe_ratio(bt_df_opt["strategy_return"].values)
+        mdd_opt = max_drawdown(bt_df_opt["strategy_cum"].values + 1.0)
+        sr_fixed = sharpe_ratio(bt_df_fixed["strategy_return"].values)
+        mdd_fixed = max_drawdown(bt_df_fixed["strategy_cum"].values + 1.0)
 
         logger.info(f"========== {split.upper()} SET RESULTS ==========")
         logger.info(f"Loss            : {metrics['loss']:.6f}")
@@ -142,17 +145,22 @@ def evaluate_and_backtest(
         logger.info(f"F1              : {metrics['f1']:.4f}")
         logger.info(f"Precision       : {metrics['precision']:.4f}")
         logger.info(f"Recall          : {metrics['recall']:.4f}")
-        logger.info(f"--- Strategy (prob > {threshold}) ---")
-        logger.info(f"Cumulative Ret  : {bt_df['strategy_cum'].iloc[-1]:.4f}")
-        logger.info(f"Sharpe Ratio    : {sr:.4f}")
-        logger.info(f"Max Drawdown    : {mdd:.4f}")
+        logger.info(f"Optimal Thresh  : {optimal_th:.4f}")
+        logger.info(f"--- Strategy (prob > {optimal_th:.4f}, optimal) ---")
+        logger.info(f"Cumulative Ret  : {bt_df_opt['strategy_cum'].iloc[-1]:.4f}")
+        logger.info(f"Sharpe Ratio    : {sr_opt:.4f}")
+        logger.info(f"Max Drawdown    : {mdd_opt:.4f}")
+        logger.info(f"--- Strategy (prob > {threshold:.1f}, fixed) ---")
+        logger.info(f"Cumulative Ret  : {bt_df_fixed['strategy_cum'].iloc[-1]:.4f}")
+        logger.info(f"Sharpe Ratio    : {sr_fixed:.4f}")
+        logger.info(f"Max Drawdown    : {mdd_fixed:.4f}")
         logger.info(f"--- Buy & Hold ---")
         logger.info(f"Cumulative Ret  : {bt_df['buyhold_cum'].iloc[-1]:.4f}")
 
         csv_path = os.path.join(result_dir, f"backtest_{split}.csv")
-        bt_df.to_csv(csv_path, index=False)
+        bt_df_opt.to_csv(csv_path, index=False)
         fig_path = os.path.join(result_dir, f"backtest_{split}.png")
-        plot_backtest(bt_df, save_path=fig_path, task=task)
+        plot_backtest(bt_df_opt, save_path=fig_path, task=task)
 
         return {
             "loss": metrics["loss"],
@@ -161,9 +169,10 @@ def evaluate_and_backtest(
             "f1": metrics["f1"],
             "precision": metrics["precision"],
             "recall": metrics["recall"],
-            "strategy_cum_ret": bt_df["strategy_cum"].iloc[-1],
-            "strategy_sharpe": sr,
-            "strategy_mdd": mdd,
+            "optimal_threshold": optimal_th,
+            "strategy_cum_ret": bt_df_opt["strategy_cum"].iloc[-1],
+            "strategy_sharpe": sr_opt,
+            "strategy_mdd": mdd_opt,
         }
     else:
         preds = metrics["preds"]
