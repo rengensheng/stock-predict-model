@@ -219,11 +219,20 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_target(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
+def add_target(df: pd.DataFrame, horizon: int = 5, label_threshold: float = 0.0) -> pd.DataFrame:
     df = df.copy()
     df["future_return"] = df["close"].shift(-horizon) / df["close"] - 1
-    df["label"] = (df["future_return"] > 0).astype(int)
     df.dropna(subset=["future_return"], inplace=True)
+    # 显著涨跌才打标签，小幅波动标记为 -1 (ignore)
+    if label_threshold > 0:
+        conditions = [
+            df["future_return"] > label_threshold,
+            df["future_return"] < -label_threshold,
+        ]
+        choices = [1, 0]
+        df["label"] = np.select(conditions, choices, default=-1)
+    else:
+        df["label"] = (df["future_return"] > 0).astype(int)
     df.reset_index(drop=True, inplace=True)
     return df
 
@@ -234,16 +243,25 @@ def create_sequences(
     seq_len: int = 60,
     target_col: str = "future_return",
     step: int = 1,
-) -> Tuple[np.ndarray, np.ndarray]:
+    task: str = "regression",
+    dates: Optional[pd.Series] = None,
+) -> Tuple[np.ndarray, np.ndarray, Optional[pd.Series]]:
     X, y = [], []
     feat_matrix = data[feature_cols].values
     target_vec = data[target_col].values
+    valid_indices = []
 
     for i in range(0, len(data) - seq_len + 1, step):
+        target_val = target_vec[i + seq_len - 1]
+        # 分类任务中跳过 label == -1 (ignore) 的样本
+        if task == "classification" and target_val == -1:
+            continue
         X.append(feat_matrix[i : i + seq_len])
-        y.append(target_vec[i + seq_len - 1])
+        y.append(target_val)
+        valid_indices.append(i + seq_len - 1)
 
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
+    out_dates = dates.iloc[valid_indices].reset_index(drop=True) if dates is not None else None
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32), out_dates
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +282,7 @@ class StockDataPipeline:
         val_ratio: float = 0.15,
         cache_dir: str = "./data_cache",
         task: str = "regression",
+        label_threshold: float = 0.0,
     ):
         self.symbols = symbols if isinstance(symbols, list) else [symbols]
         self.start_date = start_date
@@ -276,6 +295,7 @@ class StockDataPipeline:
         self.val_ratio = val_ratio
         self.cache_dir = cache_dir
         self.task = task
+        self.label_threshold = label_threshold
 
         # 根据任务类型选择目标列
         self.target_col = "label" if task == "classification" else "future_return"
@@ -309,7 +329,7 @@ class StockDataPipeline:
         processed = []
         for df in all_dfs:
             df = add_features(df)
-            df = add_target(df, horizon=self.horizon)
+            df = add_target(df, horizon=self.horizon, label_threshold=self.label_threshold)
             processed.append(df)
 
         logger.info("Step 3/6: Merging and encoding symbols ...")
@@ -321,6 +341,9 @@ class StockDataPipeline:
         self.symbol_map = {s: i for i, s in enumerate(sorted(full_df["symbol"].unique()))}
         full_df["symbol_id"] = full_df["symbol"].map(self.symbol_map)
         logger.info(f"Symbols: {list(self.symbol_map.keys())}")
+
+        logger.info("Step 3.5/6: Adding cross-sectional features ...")
+        full_df = self._add_cross_sectional_features(full_df)
 
         # 定义特征列
         exclude = {
@@ -341,6 +364,31 @@ class StockDataPipeline:
         self._build_loaders()
 
         return self
+
+    def _add_cross_sectional_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """计算横截面特征（按日期分组）。"""
+        df = df.copy()
+        # 当日收益率在横截面上的排名分位
+        df["cs_ret_rank"] = df.groupby("date")["ret_1"].rank(pct=True)
+        # 当日成交量在横截面上的排名分位
+        df["cs_volume_rank"] = df.groupby("date")["volume"].rank(pct=True)
+        # 当日成交额在横截面上的排名分位
+        if "amount" in df.columns:
+            df["cs_amount_rank"] = df.groupby("date")["amount"].rank(pct=True)
+        # 相对当日市场平均收益的超额收益
+        df["cs_excess_ret"] = df["ret_1"] - df.groupby("date")["ret_1"].transform("mean")
+        # 相对当日市场平均成交量的比值
+        df["cs_volume_ratio"] = df["volume"] / (df.groupby("date")["volume"].transform("mean") + 1e-12)
+        # RSI 横截面排名分位
+        if "rsi_14" in df.columns:
+            df["cs_rsi_rank"] = df.groupby("date")["rsi_14"].rank(pct=True)
+        # 波动率横截面排名分位
+        if "volatility_20" in df.columns:
+            df["cs_vol_rank"] = df.groupby("date")["volatility_20"].rank(pct=True)
+        # 动量横截面排名分位
+        if "ret_cum_20" in df.columns:
+            df["cs_momentum_rank"] = df.groupby("date")["ret_cum_20"].rank(pct=True)
+        return df
 
     def _split_and_scale(self, df: pd.DataFrame):
         # 按全局日期时序划分
@@ -389,27 +437,25 @@ class StockDataPipeline:
             te = self.test_df_raw[self.test_df_raw["symbol"] == sym]
 
             if len(tr) >= self.seq_len:
-                X, y = create_sequences(tr, self.feature_cols, self.seq_len, target_col=self.target_col, step=self.step)
-                all_X_train.append(X)
-                all_y_train.append(y)
-                d = tr["date"].iloc[list(range(self.seq_len - 1, len(tr), self.step))]
-                train_dates_list.append(d)
+                X, y, d = create_sequences(tr, self.feature_cols, self.seq_len, target_col=self.target_col, step=self.step, task=self.task, dates=tr["date"])
+                if len(X) > 0:
+                    all_X_train.append(X)
+                    all_y_train.append(y)
+                    train_dates_list.append(d)
 
-            # val/test 需要包含历史上下文（多取 seq_len-1 行），但这里已经按全局日期切好了
-            # 只要长度够就可以生成序列
             if len(va) >= self.seq_len:
-                X, y = create_sequences(va, self.feature_cols, self.seq_len, target_col=self.target_col, step=self.step)
-                all_X_val.append(X)
-                all_y_val.append(y)
-                d = va["date"].iloc[list(range(self.seq_len - 1, len(va), self.step))]
-                val_dates_list.append(d)
+                X, y, d = create_sequences(va, self.feature_cols, self.seq_len, target_col=self.target_col, step=self.step, task=self.task, dates=va["date"])
+                if len(X) > 0:
+                    all_X_val.append(X)
+                    all_y_val.append(y)
+                    val_dates_list.append(d)
 
             if len(te) >= self.seq_len:
-                X, y = create_sequences(te, self.feature_cols, self.seq_len, target_col=self.target_col, step=self.step)
-                all_X_test.append(X)
-                all_y_test.append(y)
-                d = te["date"].iloc[list(range(self.seq_len - 1, len(te), self.step))]
-                test_dates_list.append(d)
+                X, y, d = create_sequences(te, self.feature_cols, self.seq_len, target_col=self.target_col, step=self.step, task=self.task, dates=te["date"])
+                if len(X) > 0:
+                    all_X_test.append(X)
+                    all_y_test.append(y)
+                    test_dates_list.append(d)
 
         if not all_X_train:
             raise RuntimeError("No training sequences generated. Check seq_len vs data length.")

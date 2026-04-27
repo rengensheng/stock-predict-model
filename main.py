@@ -102,6 +102,7 @@ def main():
         train_ratio=cfg.TRAIN_RATIO,
         val_ratio=cfg.VAL_RATIO,
         task=args.task,
+        label_threshold=cfg.LABEL_THRESHOLD,
     )
     pipeline.prepare()
 
@@ -150,6 +151,7 @@ def main():
             use_focal_loss=cfg.USE_FOCAL_LOSS,
             focal_alpha=cfg.FOCAL_ALPHA,
             focal_gamma=cfg.FOCAL_GAMMA,
+            label_smoothing=cfg.LABEL_SMOOTHING,
         )
     else:
         logger.info("--skip_train is set, loading existing checkpoint ...")

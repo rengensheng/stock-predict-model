@@ -155,7 +155,7 @@ def evaluate_and_backtest(
         logger.info(f"Sharpe Ratio    : {sr_fixed:.4f}")
         logger.info(f"Max Drawdown    : {mdd_fixed:.4f}")
         logger.info(f"--- Buy & Hold ---")
-        logger.info(f"Cumulative Ret  : {bt_df['buyhold_cum'].iloc[-1]:.4f}")
+        logger.info(f"Cumulative Ret  : {bt_df_opt['buyhold_cum'].iloc[-1]:.4f}")
 
         csv_path = os.path.join(result_dir, f"backtest_{split}.csv")
         bt_df_opt.to_csv(csv_path, index=False)

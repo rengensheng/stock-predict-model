@@ -26,6 +26,8 @@ from utils import (
     plot_training_history,
 )
 
+import config as cfg
+
 logger = setup_logger("train")
 
 
@@ -37,12 +39,14 @@ class FocalLoss(nn.Module):
            (i.e. 1 - positive_ratio), so that the minority class gets higher weight.
            If alpha is None, it will be set from data (1 - pos_ratio).
     gamma: focusing parameter. Higher gamma means more focus on hard samples.
+    label_smoothing: label smoothing factor. 0 means no smoothing.
     """
 
-    def __init__(self, alpha: Optional[float] = None, gamma: float = 2.0):
+    def __init__(self, alpha: Optional[float] = None, gamma: float = 2.0, label_smoothing: float = 0.0):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
+        self.label_smoothing = label_smoothing
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -51,6 +55,8 @@ class FocalLoss(nn.Module):
             targets: (batch, 1) binary targets {0, 1}
         """
         targets = targets.float()
+        if self.label_smoothing > 0:
+            targets = targets * (1 - self.label_smoothing) + self.label_smoothing * 0.5
         bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
         probs = torch.sigmoid(logits)
         pt = targets * probs + (1 - targets) * (1 - probs)
@@ -199,6 +205,7 @@ def train_model(
     use_focal_loss: bool = False,
     focal_alpha: Optional[float] = None,
     focal_gamma: float = 2.0,
+    label_smoothing: float = 0.0,
 ):
     set_seed(seed)
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -223,8 +230,19 @@ def train_model(
                 computed_alpha = float(neg_ratio)
             else:
                 computed_alpha = focal_alpha
-            criterion = FocalLoss(alpha=computed_alpha, gamma=focal_gamma)
-            logger.info(f"Using Focal Loss: alpha={computed_alpha:.4f} (pos_weight), gamma={focal_gamma}")
+            criterion = FocalLoss(alpha=computed_alpha, gamma=focal_gamma, label_smoothing=label_smoothing)
+            logger.info(f"Using Focal Loss: alpha={computed_alpha:.4f} (pos_weight), gamma={focal_gamma}, label_smoothing={label_smoothing}")
+
+        # Initialize final classification bias to match prior, preventing all-negative logits
+        if not use_focal_loss:
+            pos_weight = torch.tensor(neg_ratio / (pos_ratio + 1e-6), dtype=torch.float32).to(device)
+            bce_kwargs = {"pos_weight": pos_weight}
+            if hasattr(nn.BCEWithLogitsLoss, "__init__") and "label_smoothing" in nn.BCEWithLogitsLoss.__init__.__code__.co_varnames:
+                bce_kwargs["label_smoothing"] = label_smoothing
+                logger.info(f"Using BCEWithLogitsLoss: pos_weight={pos_weight.item():.4f}, label_smoothing={label_smoothing}")
+            else:
+                logger.info(f"Using BCEWithLogitsLoss: pos_weight={pos_weight.item():.4f}")
+            criterion = nn.BCEWithLogitsLoss(**bce_kwargs)
 
         # Initialize final classification bias to match prior, preventing all-negative logits
         try:
@@ -235,23 +253,27 @@ def train_model(
                 logger.info(f"Initialized output bias to {init_bias:.4f} (log-odds of pos_ratio)")
         except Exception:
             pass
-        else:
-            pos_weight = torch.tensor(neg_ratio / (pos_ratio + 1e-6), dtype=torch.float32).to(device)
-            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-            logger.info(f"Using BCEWithLogitsLoss: pos_weight={pos_weight.item():.4f}")
     else:
         criterion = nn.MSELoss()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
+    # 学习率预热
+    warmup_epochs = 5
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        return 1.0
+    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     if task == "classification":
         # 分类按 AUC 早停
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="max", factor=0.5, patience=patience // 2
         )
         early_stopper = EarlyStopping(patience=patience, mode="max")
     else:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=patience // 2
         )
         early_stopper = EarlyStopping(patience=patience, mode="min")
@@ -317,7 +339,8 @@ def train_model(
                 f"Val Acc: {val_acc:.4f} | Val F1: {val_f1:.4f} | Threshold: {val_threshold:.4f}"
             )
 
-            scheduler.step(val_auc)
+            warmup_scheduler.step()
+            plateau_scheduler.step(val_auc)
             if val_auc > best_val_metric:
                 best_val_metric = val_auc
                 ckpt_path = os.path.join(checkpoint_dir, "best_model.pt")
@@ -355,7 +378,8 @@ def train_model(
                 f"Val RankIC: {val_metrics['rank_ic']:.4f} | Val DirAcc: {val_dir_acc:.4f}"
             )
 
-            scheduler.step(avg_val_loss)
+            warmup_scheduler.step()
+            plateau_scheduler.step(avg_val_loss)
             if avg_val_loss < best_val_metric:
                 best_val_metric = avg_val_loss
                 ckpt_path = os.path.join(checkpoint_dir, "best_model.pt")
