@@ -151,6 +151,8 @@ def main():
             use_focal_loss=cfg.USE_FOCAL_LOSS,
             focal_alpha=cfg.FOCAL_ALPHA,
             focal_gamma=cfg.FOCAL_GAMMA,
+            focal_dynamic_gamma=cfg.FOCAL_DYNAMIC_GAMMA,
+            focal_gamma_max=cfg.FOCAL_GAMMA_MAX,
             label_smoothing=cfg.LABEL_SMOOTHING,
         )
     else:

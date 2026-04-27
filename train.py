@@ -205,6 +205,8 @@ def train_model(
     use_focal_loss: bool = False,
     focal_alpha: Optional[float] = None,
     focal_gamma: float = 2.0,
+    focal_dynamic_gamma: bool = True,
+    focal_gamma_max: float = 5.0,
     label_smoothing: float = 0.0,
 ):
     set_seed(seed)
@@ -230,8 +232,19 @@ def train_model(
                 computed_alpha = float(neg_ratio)
             else:
                 computed_alpha = focal_alpha
-            criterion = FocalLoss(alpha=computed_alpha, gamma=focal_gamma, label_smoothing=label_smoothing)
-            logger.info(f"Using Focal Loss: alpha={computed_alpha:.4f} (pos_weight), gamma={focal_gamma}, label_smoothing={label_smoothing}")
+
+            # 根据涨跌不平衡度动态调整 gamma：越不平衡，越聚焦难分类样本
+            if focal_dynamic_gamma:
+                imbalance_ratio = max(pos_ratio, neg_ratio) / (min(pos_ratio, neg_ratio) + 1e-6)
+                computed_gamma = float(min(focal_gamma + 0.5 * np.log(imbalance_ratio), focal_gamma_max))
+            else:
+                computed_gamma = focal_gamma
+
+            criterion = FocalLoss(alpha=computed_alpha, gamma=computed_gamma, label_smoothing=label_smoothing)
+            logger.info(
+                f"Using Focal Loss: alpha={computed_alpha:.4f} (pos_weight), "
+                f"gamma={computed_gamma:.4f}, label_smoothing={label_smoothing}"
+            )
 
         # Initialize final classification bias to match prior, preventing all-negative logits
         if not use_focal_loss:

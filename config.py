@@ -24,7 +24,9 @@ CLASS_THRESHOLD = 0.5        # 分类概率阈值
 LABEL_THRESHOLD = 0.01       # 分类任务中，|future_return| < threshold 的样本标记为 ignore
 USE_FOCAL_LOSS = True        # 使用 Focal Loss 处理难分类样本
 FOCAL_ALPHA = None           # Focal Loss alpha: None=auto from class ratio, or set e.g. 0.25
-FOCAL_GAMMA = 2.0            # Focal Loss gamma 参数
+FOCAL_GAMMA = 2.0            # Focal Loss gamma 基础参数
+FOCAL_DYNAMIC_GAMMA = True   # 是否根据涨跌比动态调整 gamma（类别越不平衡，gamma 越大）
+FOCAL_GAMMA_MAX = 5.0        # gamma 上限
 LABEL_SMOOTHING = 0.1        # BCEWithLogitsLoss 的标签平滑参数
 
 # ---------------- Model ----------------
