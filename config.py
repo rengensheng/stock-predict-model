@@ -8,7 +8,7 @@ import torch
 SYMBOLS = ["sh600552"]
 START_DATE = "20150101"
 END_DATE = "20260426"
-HORIZON = 5                  # 预测未来 5 日涨跌（增加预测周期以过滤噪声）
+HORIZON = 3                 # 预测未来 5 日涨跌（增加预测周期以过滤噪声）
 SEQ_LEN = 60                 # 序列长度（增加到 60 天以捕捉更长期的模式）
 STEP = 5                     # 滑动窗口步长（增加步长以减少样本间的相关性）
 BATCH_SIZE = 128             # 增大 batch size 以稳定训练

@@ -95,7 +95,6 @@ def main():
         symbols=args.symbols,
         start_date=cfg.START_DATE,
         end_date=cfg.END_DATE,
-        horizon=args.horizon,
         seq_len=args.seq_len,
         step=args.step,
         batch_size=args.batch_size,
